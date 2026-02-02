@@ -1,0 +1,39 @@
+[project]
+name = "kaggle-image-classification-cats_dogs"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+ "jupyter",
+ "matplotlib>=3.10.8",
+ "numpy",
+ "pandas",
+ "scikit-learn",
+ "tqdm>=4.67.1",
+ "torch",
+ "torchvision",
+ "xgboost>=3.1.2",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv]
+dev-dependencies = [
+    "ipykernel",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["src"]
