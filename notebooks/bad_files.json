@@ -1,1 +1,1 @@
-["C:\\Coding Stuff\\Python\\kaggle\\kaggle-image-classification-cats_dogs\\data\\raw\\PetImages\\Cat\\666.jpg", "C:\\Coding Stuff\\Python\\kaggle\\kaggle-image-classification-cats_dogs\\data\\raw\\PetImages\\Dog\\11702.jpg"]
+{"bad_files_list": ["Cat\\666.jpg", "Dog\\11702.jpg"], "total_file_num": 25000}
