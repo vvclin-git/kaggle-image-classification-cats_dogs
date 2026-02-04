@@ -18,3 +18,8 @@ jupyter lab
 uv sync
 uv pip install -e .
 ```
+
+
+## Data Source
+
+[Microsoft Cats vs. Dogs Dataset](https://www.kaggle.com/datasets/shaunthesheep/microsoft-catsvsdogs-dataset)
