@@ -14,6 +14,7 @@ from .config import (
     TRAIN_PATH,
     get_device,
 )
+from .utils import plot_hist
 
 __all__ = [
     "DATA_DIR",
@@ -28,4 +29,5 @@ __all__ = [
     "SUBMISSIONS_DIR",
     "TRAIN_PATH",
     "get_device",
+    "plot_hist",
 ]
