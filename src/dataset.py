@@ -104,7 +104,8 @@ def find_dups_size_hash(
     return dup_groups, dup_files_list, keep_files_list
 
 
-def rgba_to_rgb_with_bg(img: Image.Image, bg: tuple[int, int, int] = (255, 255, 255)) -> Image.Image:
+def rgba_to_rgb_with_bg(path:str, bg: tuple[int, int, int] = (255, 255, 255)) -> Image.Image:
+    img = Image.open(path)
     if img.mode != "RGBA":
         img = img.convert("RGBA")
     background = Image.new("RGBA", img.size, bg + (255,))
