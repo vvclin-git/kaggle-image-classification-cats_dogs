@@ -10,6 +10,7 @@ from pathlib import Path
 from torchvision.datasets import ImageFolder
 from torch.utils.data import Subset
 from PIL import Image, UnidentifiedImageError
+from sklearn.model_selection import train_test_split
 
 
 def get_meta(path: str | Path) -> tuple[str, int, int]:
@@ -212,3 +213,17 @@ def load_filtered_imagefolder(
     ds.targets = [target for _, target in filtered_samples]
 
     return ds, exclusion_set
+
+def ds_test_split(ds:ImageFolder, test_size, random_state, stratify):
+    ds.samples = sorted(ds.samples, key=lambda x: x[0])
+    ds.targets = [l for _, l in ds.samples]
+    ds_path = [p for p, _ in ds.samples]
+    if stratify:
+        stratify_target = ds.targets
+    else:
+        stratify_target = None
+    X_train_path, X_test_path, y_train, y_test = train_test_split(ds_path, ds.targets, test_size=test_size, random_state=random_state, stratify=stratify_target)
+    path_dict = {p: i for i, p in enumerate(ds_path)}
+    idx_tr = [path_dict[p] for p in X_train_path]
+    idx_test = [path_dict[p] for p in X_test_path]
+    return idx_tr, idx_test, y_train, y_test

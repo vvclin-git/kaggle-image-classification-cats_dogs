@@ -13,4 +13,5 @@ __pycache__/
 data/raw/
 data/processed/
 outputs/models/
+outputs/checkpoints/
 outputs/logs/
