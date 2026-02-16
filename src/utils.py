@@ -1,10 +1,10 @@
 """Utility helpers."""
 
 from __future__ import annotations
+import itertools
+import statistics
 import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, confusion_matrix
-from pathlib import Path
-from typing import Any, Optional
 import torch
 from torch.utils.data import DataLoader
 import time
@@ -69,71 +69,6 @@ def plot_confusion_matrix_and_report(y_true, y_pred, target_names=['not survived
     plt.show()
     
     print(classification_report(y_true, y_pred, target_names=target_names))
-
-def save_checkpoint(
-    ckpt_path: str | Path,
-    model: torch.nn.Module,
-    optimizer: Optional[torch.optim.Optimizer] = None,
-    epoch: int = 0,
-    hist: Optional[Any] = None,
-    extra: Optional[dict[str, Any]] = None,
-) -> None:
-    # Save model/optimizer states for exact resume
-    ckpt_path = Path(ckpt_path)
-    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-
-    payload: dict[str, Any] = {
-        "epoch": epoch,
-        "model_state_dict": model.state_dict(),
-        "hist": hist,
-        "extra": extra or {},
-        "pytorch_version": torch.__version__,
-    }
-
-    if optimizer is not None:
-        payload["optimizer_state_dict"] = optimizer.state_dict()
-
-    torch.save(payload, ckpt_path)
-
-
-def load_checkpoint(
-    ckpt_path: str | Path,
-    model: torch.nn.Module,
-    optimizer: Optional[torch.optim.Optimizer] = None,
-    device: str | torch.device = "cpu",
-    strict: bool = True,
-) -> dict[str, Any]:
-    # Load states; returns dict with epoch/hist/extra, etc.
-    ckpt_path = Path(ckpt_path)
-    payload: dict[str, Any] = torch.load(ckpt_path, map_location=device)
-
-    model.load_state_dict(payload["model_state_dict"], strict=strict)
-
-    if optimizer is not None:
-        opt_sd = payload.get("optimizer_state_dict", None)
-        if opt_sd is None:
-            raise KeyError("Checkpoint has no optimizer_state_dict, cannot resume optimizer.")
-        optimizer.load_state_dict(opt_sd)
-
-    return payload
-
-
-def get_last_checkpoint(ckpt_dir: str | Path, pattern: str = "ckpt_epoch_*.pt") -> Optional[Path]:
-    # Find latest checkpoint by epoch number in filename
-    ckpt_dir = Path(ckpt_dir)
-    cands = sorted(ckpt_dir.glob(pattern))
-    if not cands:
-        return None
-
-    def parse_epoch(p: Path) -> int:
-        s = p.stem  # e.g., ckpt_epoch_120
-        try:
-            return int(s.split("_")[-1])
-        except Exception:
-            return -1
-
-    cands = sorted(cands, key=parse_epoch)
-    return cands[-1]
 
 def profile_dataloader(
     ds,
@@ -255,3 +190,254 @@ def profile_dataloader(
         "img_s": img_s,
         "loader_kwargs": dl_kwargs,
     }
+
+
+def profile_dataloader_grid_search(
+    ds,
+    model,
+    device,
+    param_grid: dict[str, list] | list[dict],
+    *,
+    loss_fn=None,
+    optimizer=None,
+    mode: str = "val",
+    steps: int = 200,
+    warmup: int = 20,
+    lr: float = 1e-3,
+    repeats: int = 1,
+):
+    """
+    Grid-search DataLoader settings and profile throughput.
+
+    `param_grid` supports two forms:
+    - dict[str, list]: cartesian product over all values
+    - list[dict]: explicit list of configurations
+
+    Each configuration must include at least:
+    - batch_size
+    - num_workers
+
+    Returns:
+      {
+        "best": {...},
+        "results": [...],
+        "plot_data": {
+            "labels": [...],
+            "img_s": [...],
+            "total": [...],
+            "load_tf": [...],
+            "h2d": [...],
+            "gpu": [...],
+        },
+      }
+    """
+    if repeats < 1:
+        raise ValueError("repeats must be >= 1")
+
+    if isinstance(param_grid, dict):
+        keys = list(param_grid.keys())
+        values = [param_grid[k] for k in keys]
+        configs = [dict(zip(keys, combo)) for combo in itertools.product(*values)]
+    elif isinstance(param_grid, list):
+        configs = param_grid
+    else:
+        raise TypeError("param_grid must be dict[str, list] or list[dict]")
+
+    results = []
+    for config in configs:
+        if "batch_size" not in config or "num_workers" not in config:
+            raise ValueError("each config must include 'batch_size' and 'num_workers'")
+
+        rep_metrics = []
+        for _ in range(repeats):
+            metrics = profile_dataloader(
+                ds=ds,
+                model=model,
+                device=device,
+                batch_size=int(config["batch_size"]),
+                num_workers=int(config["num_workers"]),
+                loss_fn=loss_fn,
+                optimizer=optimizer,
+                mode=mode,
+                steps=steps,
+                warmup=warmup,
+                lr=lr,
+                prefetch_factor=config.get("prefetch_factor"),
+                persistent_workers=config.get("persistent_workers", True),
+                pin_memory=config.get("pin_memory", True),
+                drop_last=config.get("drop_last", True),
+            )
+            rep_metrics.append(metrics)
+
+        avg_metrics = {
+            "mode": mode,
+            "batch_size": int(config["batch_size"]),
+            "num_workers": int(config["num_workers"]),
+            "prefetch_factor": config.get("prefetch_factor"),
+            "persistent_workers": config.get("persistent_workers", True),
+            "pin_memory": config.get("pin_memory", True),
+            "drop_last": config.get("drop_last", True),
+            "load_tf": sum(m["load_tf"] for m in rep_metrics) / repeats,
+            "h2d": sum(m["h2d"] for m in rep_metrics) / repeats,
+            "gpu": sum(m["gpu"] for m in rep_metrics) / repeats,
+            "total": sum(m["total"] for m in rep_metrics) / repeats,
+            "img_s": sum(m["img_s"] for m in rep_metrics) / repeats,
+        }
+        avg_metrics["config_label"] = (
+            f"bs={avg_metrics['batch_size']}, "
+            f"nw={avg_metrics['num_workers']}, "
+            f"pf={avg_metrics['prefetch_factor']}, "
+            f"pw={avg_metrics['persistent_workers']}, "
+            f"pin={avg_metrics['pin_memory']}"
+        )
+        results.append(avg_metrics)
+
+    results = sorted(results, key=lambda x: x["img_s"], reverse=True)
+    best = results[0] if results else None
+
+    plot_data = {
+        "labels": [r["config_label"] for r in results],
+        "img_s": [r["img_s"] for r in results],
+        "total": [r["total"] for r in results],
+        "load_tf": [r["load_tf"] for r in results],
+        "h2d": [r["h2d"] for r in results],
+        "gpu": [r["gpu"] for r in results],
+    }
+
+    return {
+        "best": best,
+        "results": results,
+        "plot_data": plot_data,
+    }
+
+
+def build_profile_heatmap_data(
+    profile_results: dict | list[dict],
+    x_param: str,
+    y_param: str,
+    metrics: list[str] | None = None,
+    *,
+    agg: str = "mean",
+    fill_value=None,
+):
+    """
+    Build heatmap-ready matrices from DataLoader profiling results.
+
+    Args:
+      profile_results:
+        - output dict from `profile_dataloader_grid_search`, or
+        - list of result dicts with config + metric fields.
+      x_param, y_param:
+        DataLoader config fields for heatmap axes (e.g. "num_workers", "batch_size").
+      metrics:
+        Metrics for cell color values. Defaults to ["img_s"].
+        Supported: "img_s", "gpu", "h2d", "load_tf", "total".
+        Alias: "load_ft" -> "load_tf".
+      agg:
+        How to aggregate multiple runs per same (x, y) cell:
+        "mean" (default), "median", "min", "max".
+      fill_value:
+        Value to place for missing cells.
+
+    Returns:
+      {
+        "x_param": ...,
+        "y_param": ...,
+        "x_values": [...],
+        "y_values": [...],
+        "metrics": [...],
+        "matrices": {
+            "img_s": [[...], ...],   # shape: [len(y_values)][len(x_values)]
+            ...
+        }
+      }
+    """
+    if isinstance(profile_results, dict):
+        rows = profile_results.get("results")
+        if rows is None:
+            raise ValueError("profile_results dict must contain a 'results' field")
+    elif isinstance(profile_results, list):
+        rows = profile_results
+    else:
+        raise TypeError("profile_results must be dict or list[dict]")
+
+    if not rows:
+        return {
+            "x_param": x_param,
+            "y_param": y_param,
+            "x_values": [],
+            "y_values": [],
+            "metrics": [] if metrics is None else metrics,
+            "matrices": {},
+        }
+
+    metric_alias = {"load_ft": "load_tf", "throughput": "img_s"}
+    metrics = ["img_s"] if metrics is None else metrics
+    resolved_metrics = [metric_alias.get(m, m) for m in metrics]
+    allowed_metrics = {"img_s", "gpu", "h2d", "load_tf", "total"}
+    invalid = [m for m in resolved_metrics if m not in allowed_metrics]
+    if invalid:
+        raise ValueError(f"unsupported metrics: {invalid}")
+
+    if agg not in {"mean", "median", "min", "max"}:
+        raise ValueError("agg must be one of: mean, median, min, max")
+
+    for row in rows:
+        if x_param not in row or y_param not in row:
+            raise ValueError(f"each row must contain x_param='{x_param}' and y_param='{y_param}'")
+        for m in resolved_metrics:
+            if m not in row:
+                raise ValueError(f"each row must contain metric '{m}'")
+
+    x_values = sorted({row[x_param] for row in rows}, key=lambda v: str(v))
+    y_values = sorted({row[y_param] for row in rows}, key=lambda v: str(v))
+    x_index = {x: i for i, x in enumerate(x_values)}
+    y_index = {y: i for i, y in enumerate(y_values)}
+
+    cell_lists = {
+        m: [[[] for _ in x_values] for _ in y_values]
+        for m in resolved_metrics
+    }
+    for row in rows:
+        xi = x_index[row[x_param]]
+        yi = y_index[row[y_param]]
+        for m in resolved_metrics:
+            cell_lists[m][yi][xi].append(float(row[m]))
+
+    def _reduce(vals: list[float]):
+        if not vals:
+            return fill_value
+        if agg == "mean":
+            return sum(vals) / len(vals)
+        if agg == "median":
+            return statistics.median(vals)
+        if agg == "min":
+            return min(vals)
+        return max(vals)
+
+    matrices = {
+        m: [[_reduce(cell) for cell in row] for row in cell_lists[m]]
+        for m in resolved_metrics
+    }
+
+    return {
+        "x_param": x_param,
+        "y_param": y_param,
+        "x_values": x_values,
+        "y_values": y_values,
+        "metrics": resolved_metrics,
+        "matrices": matrices,
+    }
+
+def display_model_info(model):
+    """Display model parameter count and size in MB."""
+    param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    param_size = 0
+    for param in model.parameters():
+        param_size += param.nelement() * param.element_size()
+    buffer_size = 0
+    for buffer in model.buffers():
+        buffer_size += buffer.nelement() * buffer.element_size()
+    size_mb = (param_size + buffer_size) / 1024 / 1024
+    print(f"Trainable parameters: {param_count}")
+    print(f"Model size: {size_mb:.2f} MB")

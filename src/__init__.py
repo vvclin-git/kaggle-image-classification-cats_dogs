@@ -14,6 +14,7 @@ from .config import (
     TRAIN_PATH,
     get_device,
 )
+from .training import get_last_checkpoint, load_checkpoint, save_checkpoint
 from .utils import plot_hist
 
 __all__ = [
@@ -29,5 +30,8 @@ __all__ = [
     "SUBMISSIONS_DIR",
     "TRAIN_PATH",
     "get_device",
+    "get_last_checkpoint",
+    "load_checkpoint",
     "plot_hist",
+    "save_checkpoint",
 ]
