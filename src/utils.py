@@ -8,7 +8,7 @@ from sklearn.metrics import classification_report, confusion_matrix
 import torch
 from torch.utils.data import DataLoader
 import time
-
+import numpy as np
 
 def plot_hist(hist_list, figsize=(12, 4), show=True):
     # Normalize input
