@@ -95,6 +95,71 @@ The final EfficientNet-B0 model achieved near-99% precision / recall / F1 on the
 
 ## 6. How to Run
 
+### Final Model Deployment Workflow
+For future deployment, use this exact 5-stage flow:
+
+1. DataLoader profiling
+2. CV training
+3. Data split
+4. Model training
+5. Model inference
+
+```python
+from sklearn.model_selection import StratifiedKFold
+from src import FinalModelWorkflow
+
+wf = FinalModelWorkflow(device=DEVICE)
+
+# 1) dataloader profiling
+profile = wf.dataloader_profiling(
+    ds=ds_aug,
+    model=model_for_profile,
+    param_grid={"batch_size": [32, 64], "num_workers": [4, 8]},
+    mode="train",
+    steps=100,
+    warmup=20,
+    repeats=1,
+)
+
+# 2) cv training
+hist_cv, oof = wf.cv_training(
+    model_cls=FinalModelClass,
+    model_params={"num_classes": 2},
+    idx_train=idx_train,
+    y_train=y_train,
+    ds=ds,
+    ds_aug=ds_aug,
+    splitter=StratifiedKFold(n_splits=5, shuffle=True, random_state=37),
+    epochs=5,
+    tr_bs=64,
+    val_bs=64,
+)
+
+# 3) data split
+idx_tr, idx_te, y_tr, y_te = wf.data_split(
+    ds=ds,
+    test_size=0.2,
+    random_state=37,
+    stratify=True,
+)
+
+# 4) model training
+hist_final = wf.model_training(
+    model=final_model,
+    idx_train=idx_tr,
+    y_train=y_tr,
+    ds_tr=ds_train_subset,
+    ds_val=ds_val_subset,
+    loss_fn=loss_fn,
+    optimizer=optimizer,
+    epochs=10,
+    tr_bs=64,
+    val_bs=64,
+)
+
+# 5) model inference
+pred = wf.model_inference(model=final_model, data=ds_test_subset, batch_size=128)
+```
 
 ---
 

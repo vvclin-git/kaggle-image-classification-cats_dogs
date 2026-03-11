@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import gc
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
+
+from .config import SEED
 
 try:
     from tqdm.auto import tqdm
@@ -192,6 +195,142 @@ class CVTrainer:
                 torch.cuda.empty_cache()
 
         return self.hist, self.oof_y_pred
+
+
+class Trainer:
+    """Single-split trainer (train/val) used by improve notebook."""
+
+    def __init__(
+        self,
+        *,
+        model: torch.nn.Module,
+        idx_train: list[int] | np.ndarray,
+        y_train: list[int] | np.ndarray,
+        ds_tr: Subset,
+        ds_val: Subset,
+        loss_fn: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        device: str | torch.device = "cpu",
+    ) -> None:
+        self.model = model
+        self.idx_train = np.asarray(idx_train)
+        self.y_train = np.asarray(y_train)
+        self.ds_tr = ds_tr
+        self.ds_val = ds_val
+        self.loss_fn = loss_fn
+        self.optimizer = optimizer
+        self.device = device
+        self.hist: dict[str, list[float]] = {"loss": [], "val_loss": []}
+
+    def train(
+        self,
+        epochs: int,
+        tr_bs: int,
+        val_bs: int | None = None,
+        *,
+        tr_nw: int = 4,
+        val_nw: int = 4,
+        show_progress: bool = True,
+        chk_pt_period: int = 20,
+        save_chk_pt: bool = False,
+        chk_pt_dir: Path | None = None,
+    ) -> dict[str, list[float]]:
+        if val_bs is None:
+            val_bs = tr_bs
+        if save_chk_pt and chk_pt_dir is None:
+            raise ValueError("chk_pt_dir must be provided when save_chk_pt=True")
+
+        tr_dl = DataLoader(
+            self.ds_tr,
+            tr_bs,
+            shuffle=True,
+            num_workers=tr_nw,
+            persistent_workers=tr_nw > 0,
+            pin_memory=True,
+        )
+        val_dl = DataLoader(
+            self.ds_val,
+            val_bs,
+            shuffle=False,
+            num_workers=val_nw,
+            persistent_workers=val_nw > 0,
+            pin_memory=True,
+        )
+
+        epoch_iter = (
+            tqdm(range(epochs), desc="epoch", leave=False)
+            if show_progress
+            else range(epochs)
+        )
+
+        for e in epoch_iter:
+            if show_progress and hasattr(epoch_iter, "set_description"):
+                epoch_iter.set_description(f"epoch {e + 1}/{epochs}")
+
+            self.model.train()
+            total_loss = 0.0
+            fold_tr_size = 0
+            train_iter = (
+                tqdm(tr_dl, desc=f"train e{e + 1}", leave=False) if show_progress else tr_dl
+            )
+            for x, y in train_iter:
+                x = x.to(self.device, non_blocking=True)
+                y = y.to(self.device, non_blocking=True)
+                self.optimizer.zero_grad(set_to_none=True)
+                logits = self.model(x)
+                loss = self.loss_fn(logits, y.long())
+                bs = x.size(0)
+                fold_tr_size += bs
+                total_loss += float(loss.item()) * bs
+                loss.backward()
+                self.optimizer.step()
+            train_loss = total_loss / max(fold_tr_size, 1)
+            self.hist["loss"].append(train_loss)
+
+            self.model.eval()
+            total_val_loss = 0.0
+            fold_val_size = 0
+            val_iter = (
+                tqdm(val_dl, desc=f"val e{e + 1}", leave=False) if show_progress else val_dl
+            )
+            with torch.inference_mode():
+                for x, y in val_iter:
+                    x = x.to(self.device, non_blocking=True)
+                    y = y.to(self.device, non_blocking=True)
+                    logits = self.model(x)
+                    loss = self.loss_fn(logits, y.long())
+                    bs = x.size(0)
+                    fold_val_size += bs
+                    total_val_loss += float(loss.item()) * bs
+            val_loss = total_val_loss / max(fold_val_size, 1)
+            self.hist["val_loss"].append(val_loss)
+
+            if show_progress and hasattr(epoch_iter, "set_postfix"):
+                epoch_iter.set_postfix(loss=f"{train_loss:.4f}", val_loss=f"{val_loss:.4f}")
+
+            if (e + 1) % chk_pt_period == 0:
+                if show_progress:
+                    print(
+                        f"epoch: {e + 1}: train loss: {train_loss:.4f}, val_loss={val_loss:.4f}"
+                    )
+                if save_chk_pt:
+                    timestr = time.strftime("%Y%m%d-%H-%M-%S")
+                    ckpt_path = f"ckpt_{timestr}_{e + 1}.pt"
+                    save_checkpoint(
+                        ckpt_path=chk_pt_dir / ckpt_path,
+                        model=self.model,
+                        optimizer=self.optimizer,
+                        epoch=e + 1,
+                        hist=self.hist,
+                        extra={
+                            "seed": SEED,
+                            "batch_size": tr_bs,
+                            "val_batch_size": val_bs,
+                        },
+                    )
+
+        del tr_dl, val_dl
+        return self.hist
 
 
 def save_checkpoint(
