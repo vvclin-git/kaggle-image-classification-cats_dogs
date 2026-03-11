@@ -19,6 +19,9 @@ dependencies = [
  "onnxscript>=0.6.2",
 ]
 
+[project.scripts]
+cats-dogs-cli = "src.cli:main"
+
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }

@@ -12,6 +12,7 @@ Predict whether a pet image belongs to the **cat** or **dog** class.
 
 ## 2. Dataset
 - Source: `PetImages` image folder dataset
+- Dataset link: [Microsoft Cats vs Dogs (PetImages) - Kaggle](https://www.kaggle.com/datasets/shaunthesheep/microsoft-catsvsdogs-dataset)
 - Input: Pet images loaded from `ImageFolder`
 - Target: Binary class label (`cat` / `dog`)
 - Data cleaning:
@@ -95,14 +96,14 @@ The final EfficientNet-B0 model achieved near-99% precision / recall / F1 on the
 
 ## 6. How to Run
 
-### Final Model Deployment Workflow
-For future deployment, use this exact 5-stage flow:
+### 6.1 Notebook Workflow
+Use the notebooks in order:
 
-1. DataLoader profiling
-2. CV training
-3. Data split
-4. Model training
-5. Model inference
+1. `notebooks/00_eda.ipynb`
+2. `notebooks/01_baseline_train.ipynb`
+3. `notebooks/02_improve_train.ipynb`
+
+For deployment-style orchestration inside Python, use `FinalModelWorkflow`:
 
 ```python
 from sklearn.model_selection import StratifiedKFold
@@ -110,18 +111,12 @@ from src import FinalModelWorkflow
 
 wf = FinalModelWorkflow(device=DEVICE)
 
-# 1) dataloader profiling
 profile = wf.dataloader_profiling(
     ds=ds_aug,
     model=model_for_profile,
     param_grid={"batch_size": [32, 64], "num_workers": [4, 8]},
-    mode="train",
-    steps=100,
-    warmup=20,
-    repeats=1,
 )
 
-# 2) cv training
 hist_cv, oof = wf.cv_training(
     model_cls=FinalModelClass,
     model_params={"num_classes": 2},
@@ -130,20 +125,9 @@ hist_cv, oof = wf.cv_training(
     ds=ds,
     ds_aug=ds_aug,
     splitter=StratifiedKFold(n_splits=5, shuffle=True, random_state=37),
-    epochs=5,
-    tr_bs=64,
-    val_bs=64,
 )
 
-# 3) data split
-idx_tr, idx_te, y_tr, y_te = wf.data_split(
-    ds=ds,
-    test_size=0.2,
-    random_state=37,
-    stratify=True,
-)
-
-# 4) model training
+idx_tr, idx_te, y_tr, y_te = wf.data_split(ds=ds, test_size=0.2, random_state=37, stratify=True)
 hist_final = wf.model_training(
     model=final_model,
     idx_train=idx_tr,
@@ -156,9 +140,76 @@ hist_final = wf.model_training(
     tr_bs=64,
     val_bs=64,
 )
-
-# 5) model inference
 pred = wf.model_inference(model=final_model, data=ds_test_subset, batch_size=128)
+```
+
+### 6.2 CLI Workflow
+The CLI is split by workflow stage:
+
+1. `profile-dataloader`
+2. `cv-train`
+3. `split-data`
+4. `train-model`
+5. `infer-model`
+
+Argument conventions:
+1. `--dataset-factory` and `--model-class` are dotted paths.
+2. `--model-params-json`, `--optimizer-params-json`, `--param-grid-json` are inline JSON strings.
+3. Persist intermediate files between steps (`split.json`, `cv_result.json`, `train_result.json`, checkpoints, inference outputs).
+
+Example commands:
+
+```powershell
+# 1) DataLoader profiling
+cats-dogs-cli profile-dataloader `
+  --dataset-factory my_project.factories:build_dataset_aug `
+  --model-class src.model.EffNet_B0_Clf `
+  --model-params-json "{\"num_classes\":2,\"train_mods\":[\"features.7\",\"features.8\",\"classifier\"]}" `
+  --param-grid-json "{\"batch_size\":[32,64],\"num_workers\":[4,8]}" `
+  --mode train --steps 100 --warmup 20 --repeats 1 `
+  --out-json outputs/profile.json
+
+# 2) CV training
+cats-dogs-cli cv-train `
+  --dataset-factory my_project.factories:build_dataset_val `
+  --dataset-aug-factory my_project.factories:build_dataset_aug `
+  --split-json outputs/split.json `
+  --model-class src.model.EffNet_B0_Clf `
+  --model-params-json "{\"num_classes\":2,\"train_mods\":[\"features.7\",\"features.8\",\"classifier\"]}" `
+  --loss-fn-class torch.nn.CrossEntropyLoss `
+  --optimizer-class torch.optim.Adam `
+  --optimizer-params-json "{\"lr\":0.001,\"weight_decay\":0.0001}" `
+  --n-splits 5 --epochs 5 --tr-bs 64 --val-bs 64 --tr-nw 4 --val-nw 4 `
+  --out-json outputs/cv_result.json
+
+# 3) Data split
+cats-dogs-cli split-data `
+  --dataset-factory my_project.factories:build_dataset_val `
+  --test-size 0.2 --random-state 37 --stratify `
+  --out-json outputs/split.json
+
+# 4) Final model training
+cats-dogs-cli train-model `
+  --dataset-factory my_project.factories:build_dataset_val `
+  --split-json outputs/split.json `
+  --model-class src.model.EffNet_B0_Clf `
+  --model-params-json "{\"num_classes\":2,\"train_mods\":[\"features.7\",\"features.8\",\"classifier\"]}" `
+  --loss-fn-class torch.nn.CrossEntropyLoss `
+  --optimizer-class torch.optim.Adam `
+  --optimizer-params-json "{\"lr\":0.001,\"weight_decay\":0.0001}" `
+  --epochs 10 --tr-bs 64 --val-bs 64 --tr-nw 4 --val-nw 4 `
+  --checkpoint-out outputs/checkpoints/final_effb0.pt `
+  --out-json outputs/train_result.json
+
+# 5) Model inference
+cats-dogs-cli infer-model `
+  --dataset-factory my_project.factories:build_dataset_val `
+  --model-class src.model.EffNet_B0_Clf `
+  --model-params-json "{\"num_classes\":2,\"train_mods\":[\"features.7\",\"features.8\",\"classifier\"]}" `
+  --checkpoint-path outputs/checkpoints/final_effb0.pt `
+  --split-json outputs/split.json --use-split test `
+  --batch-size 128 --num-workers 4 `
+  --out-npz outputs/infer_test.npz --out-json outputs/infer_test.json
 ```
 
 ---
