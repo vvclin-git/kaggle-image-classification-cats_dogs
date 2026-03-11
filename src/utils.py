@@ -441,3 +441,4 @@ def display_model_info(model):
     size_mb = (param_size + buffer_size) / 1024 / 1024
     print(f"Trainable parameters: {param_count}")
     print(f"Model size: {size_mb:.2f} MB")
+
