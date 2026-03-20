@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import importlib
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -56,6 +58,81 @@ def _load_split(path: str | Path) -> dict[str, Any]:
 
 def _build_workflow(device: str | None) -> FinalModelWorkflow:
     return FinalModelWorkflow(device=device or get_device())
+
+
+def _load_model_weights(model: torch.nn.Module, checkpoint_path: str, device: str | None) -> None:
+    payload = torch.load(checkpoint_path, weights_only=False, map_location=device or get_device())
+    state_dict = payload["model_state_dict"] if isinstance(payload, dict) and "model_state_dict" in payload else payload
+    model.load_state_dict(state_dict)
+
+
+def _call_dataset_factory(dataset_factory: Any, dataset_root: str | None = None) -> Any:
+    if dataset_root is None:
+        return dataset_factory()
+
+    sig = inspect.signature(dataset_factory)
+    params = list(sig.parameters.values())
+    if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+        return dataset_factory(dataset_root)
+    positional = [
+        p
+        for p in params
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if positional:
+        return dataset_factory(dataset_root)
+    raise TypeError(
+        f"Dataset factory {dataset_factory!r} does not accept a dataset root argument."
+    )
+
+
+def _extract_inference_paths(data: Any) -> list[str] | None:
+    if isinstance(data, Subset):
+        base_paths = _extract_inference_paths(data.dataset)
+        if base_paths is None:
+            return None
+        return [base_paths[i] for i in data.indices]
+    paths = getattr(data, "paths", None)
+    if paths is None:
+        return None
+    return [str(p) for p in paths]
+
+
+def _write_submission_csv(
+    infer_json: str | Path,
+    out_csv: str | Path,
+    *,
+    positive_class_index: int = 1,
+    label_mode: str = "proba",
+) -> None:
+    payload = json.loads(Path(infer_json).read_text(encoding="utf-8"))
+    image_paths = payload.get("image_paths")
+    if not image_paths:
+        raise KeyError("Inference JSON is missing image_paths.")
+
+    y_pred = payload.get("y_pred")
+    y_proba = payload.get("y_proba")
+
+    rows: list[tuple[int, float]] = []
+    for i, image_path in enumerate(image_paths):
+        image_id = int(Path(image_path).stem)
+        if label_mode == "proba":
+            if y_proba is None:
+                raise KeyError("Inference JSON is missing y_proba.")
+            label = float(y_proba[i][positive_class_index])
+        else:
+            if y_pred is None:
+                raise KeyError("Inference JSON is missing y_pred.")
+            label = float(y_pred[i])
+        rows.append((image_id, label))
+
+    rows.sort(key=lambda x: x[0])
+    out_path = Path(out_csv)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["id", "label"])
+        writer.writerows(rows)
 
 
 def cmd_split_data(args: argparse.Namespace) -> None:
@@ -193,26 +270,29 @@ def cmd_infer_model(args: argparse.Namespace) -> None:
     dataset_factory = _resolve_dotted(args.dataset_factory)
     model_cls = _resolve_dotted(args.model_class)
     model_params = _parse_json(args.model_params_json, {})
+    device = args.device or get_device()
 
-    ds = dataset_factory()
+    ds = _call_dataset_factory(dataset_factory, args.dataset_root)
     data = ds
     if args.split_json and args.use_split != "all":
         split = _load_split(args.split_json)
         idx = split["idx_test"] if args.use_split == "test" else split["idx_train"]
         data = Subset(ds, idx)
 
-    model = model_cls(**model_params)
+    model = model_cls(**model_params).to(device)
     if args.checkpoint_path:
-        payload = torch.load(args.checkpoint_path, map_location=args.device or get_device())
-        model.load_state_dict(payload["model_state_dict"])
+        _load_model_weights(model, args.checkpoint_path, device)
 
-    wf = _build_workflow(args.device)
+    wf = _build_workflow(device)
     pred = wf.model_inference(
         model=model,
         data=data,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
+    image_paths = _extract_inference_paths(data)
+    if image_paths is not None:
+        pred["image_paths"] = np.asarray(image_paths, dtype=str)
 
     if args.out_npz:
         p = Path(args.out_npz)
@@ -222,6 +302,16 @@ def cmd_infer_model(args: argparse.Namespace) -> None:
     if args.out_json:
         _save_json(args.out_json, pred)
         print(f"saved inference json -> {args.out_json}")
+
+
+def cmd_make_submission(args: argparse.Namespace) -> None:
+    _write_submission_csv(
+        args.infer_json,
+        args.out_csv,
+        positive_class_index=args.positive_class_index,
+        label_mode=args.label_mode,
+    )
+    print(f"saved submission csv -> {args.out_csv}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -288,6 +378,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_inf = sub.add_parser("infer-model", help="Workflow 5: model inference")
     p_inf.add_argument("--dataset-factory", required=True, help="dotted callable path")
+    p_inf.add_argument("--dataset-root", default=None, help="optional dataset root passed to the dataset factory")
     p_inf.add_argument("--model-class", required=True, help="dotted class path")
     p_inf.add_argument("--model-params-json", default=None, help="inline json object")
     p_inf.add_argument("--checkpoint-path", default=None)
@@ -298,6 +389,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_inf.add_argument("--out-npz", default=None)
     p_inf.add_argument("--out-json", default=None)
     p_inf.set_defaults(func=cmd_infer_model)
+
+    p_sub = sub.add_parser("make-submission", help="Convert inference json to Kaggle submission csv")
+    p_sub.add_argument("--infer-json", required=True)
+    p_sub.add_argument("--out-csv", required=True)
+    p_sub.add_argument("--label-mode", choices=["proba", "pred"], default="proba")
+    p_sub.add_argument("--positive-class-index", type=int, default=1)
+    p_sub.set_defaults(func=cmd_make_submission)
 
     return parser
 
@@ -310,4 +408,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

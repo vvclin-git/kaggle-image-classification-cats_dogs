@@ -15,3 +15,4 @@ data/processed/
 outputs/models/
 outputs/checkpoints/
 outputs/logs/
+outputs/

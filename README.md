@@ -151,11 +151,13 @@ The CLI is split by workflow stage:
 3. `split-data`
 4. `train-model`
 5. `infer-model`
+6. `make-submission`
 
 Argument conventions:
 1. `--dataset-factory` and `--model-class` are dotted paths.
 2. `--model-params-json`, `--optimizer-params-json`, `--param-grid-json` are inline JSON strings.
-3. Persist intermediate files between steps (`split.json`, `cv_result.json`, `train_result.json`, checkpoints, inference outputs).
+3. `infer-model` can pass `--dataset-root` into a dataset factory for inference-only datasets.
+4. Persist intermediate files between steps (`split.json`, `cv_result.json`, `train_result.json`, checkpoints, inference outputs).
 
 Example commands:
 
@@ -201,7 +203,7 @@ cats-dogs-cli train-model `
   --checkpoint-out outputs/checkpoints/final_effb0.pt `
   --out-json outputs/train_result.json
 
-# 5) Model inference
+# 5) Model inference on a labeled dataset split
 cats-dogs-cli infer-model `
   --dataset-factory my_project.factories:build_dataset_val `
   --model-class src.model.EffNet_B0_Clf `
@@ -210,7 +212,27 @@ cats-dogs-cli infer-model `
   --split-json outputs/split.json --use-split test `
   --batch-size 128 --num-workers 4 `
   --out-npz outputs/infer_test.npz --out-json outputs/infer_test.json
+
+# 6) Model inference on an unlabeled folder
+cats-dogs-cli infer-model `
+  --dataset-factory src.infer_datasets:build_unlabeled_dataset `
+  --dataset-root "data/raw/dogs-vs-cats-redux-kernels-edition/test/test" `
+  --model-class src.model.EffNet_B0_Clf `
+  --model-params-json "{\"num_classes\":2,\"train_mods\":[\"features.7\",\"features.8\",\"classifier\"]}" `
+  --checkpoint-path outputs/checkpoints/final_effb0.pt `
+  --batch-size 128 --num-workers 4 `
+  --out-json outputs/infer_redux_test.json
+
+# 7) Convert inference output to Kaggle submission CSV
+cats-dogs-cli make-submission `
+  --infer-json outputs/infer_redux_test.json `
+  --out-csv outputs/submission.csv
 ```
+
+Notes:
+- `infer-model` accepts checkpoints saved by this project and plain `state_dict` files.
+- For unlabeled inference, the output JSON includes `image_paths`, `y_pred`, and `y_proba`.
+- `make-submission` writes `id,label` CSV. By default it uses `y_proba[:, 1]`; use `--label-mode pred` to write hard class predictions instead.
 
 ---
 
